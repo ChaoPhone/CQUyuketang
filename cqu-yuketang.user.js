@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         重庆大学雨课堂刷课助手 (CQU 适配版)
 // @namespace    https://courses.cqu.edu.cn/
-// @version      1.1.0
+// @version      1.1.1
 // @description  适配重庆大学在线课程平台（courses.cqu.edu.cn）的自动播放助手，仅供个人学习使用。思路源自开源项目 Niuwh/yuketang-jiaoben。
 // @author       CQU 适配版
 // @license      GPL-3.0
@@ -77,7 +77,7 @@
    * ========================================================================== */
 
   const Config = {
-    version: '1.1.0',
+    version: '1.1.1',
     playbackRate: 2,          // 视频倍速
     pptInterval: 3000,        // PPT 自动翻页间隔(ms)
     pollInterval: 1000,       // 通用轮询间隔
@@ -1678,8 +1678,16 @@
       }
       .tool:hover{background:var(--canvas);color:var(--primary)}
 
-      /* ---- 日志区 ---- */
-      .body{flex:1 1 auto;overflow-y:auto;padding:10px 12px;background:var(--surface)}
+      /* ---- 日志区 ----
+         滚动三要素缺一不可：
+           1. flex 子项默认 min-height:auto，内容高了会把容器撑开而不是出现滚动条
+              —— 必须显式 min-height:0，否则 overflow-y:auto 完全不起作用；
+           2. overflow-y:auto 提供滚动；
+           3. overscroll-behavior:contain 防止滚到边界后把滚动传给宿主页面。 */
+      .body{
+        flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+        padding:10px 12px;background:var(--surface);scrollbar-gutter:stable;
+      }
       .info{margin:0;padding:0;list-style:none}
       .info li{
         font-size:12px;line-height:1.6;color:var(--body);
@@ -1836,43 +1844,160 @@
       minimality: $('minimality'), question: $('question'), miniBasic: $('mini'),
     };
     // ---- 拖拽 ----
+    //
+    // 上游版本「不能随便拖动」的三个原因，逐条修掉：
+    //
+    //   1. 用 screenX/screenY 算增量。屏幕坐标会被浏览器缩放、多显示器
+    //      DPI 缩放影响，与 CSS 像素不是 1:1，拖动时手感发飘、位置对不上。
+    //      → 改用 clientX/clientY：同一文档内它就是 CSS 像素，精确。
+    //
+    //   2. 拖动范围用 Math.min(Math.max(0, ...), max) 写死不许出界，
+    //      但 iframe 一旦被拖到窗口外就再也够不着，表现为「拖不动了」。
+    //      → 仍然约束（全出界会彻底找不回来），但留 48px 可抓取边缘，
+    //        并支持把面板拖到负坐标方向留一点余量。
+    //
+    //   3. 拖动过程中指针一旦移出 iframe，mousemove 就落在宿主页面上，
+    //      iframe 断断续续收到事件，表现为「拖到一半卡住」。
+    //      → 用 Pointer Events + setPointerCapture 把指针事件锁在 header 上，
+    //        同时给 iframe 加 pointer-events:none 兜底。
+    //
+    // 另外用 requestAnimationFrame 合并高频移动，避免每个 mousemove 都写一次样式。
     let isDragging = false;
-    let startX = 0; let startY = 0; let startLeft = 0; let startTop = 0;
-    const hostWindow = window.parent || window;
-    const onMove = e => {
-      if (!isDragging) return;
-      const deltaX = e.screenX - startX;
-      const deltaY = e.screenY - startY;
-      const maxLeft = Math.max(0, hostWindow.innerWidth - iframe.offsetWidth);
-      const maxTop = Math.max(0, hostWindow.innerHeight - iframe.offsetHeight);
-      iframe.style.left = Math.min(Math.max(0, startLeft + deltaX), maxLeft) + 'px';
-      iframe.style.top = Math.min(Math.max(0, startTop + deltaY), maxTop) + 'px';
+    let dragStartX = 0;      // clientX
+    let dragStartY = 0;      // clientY
+    let dragStartLeft = 0;
+    let dragStartTop = 0;
+    let pendingLeft = null;
+    let pendingTop = null;
+    let rafId = null;
+    let activePointerId = null;
+
+    // 视口尺寸：优先读 script 所在窗口；parent 可能跨域，读不到就用 window
+    const viewport = () => {
+      try {
+        const w = window.top;
+        if (w && typeof w.innerWidth === 'number') return { w: w.innerWidth, h: w.innerHeight };
+      } catch (_) { /* 跨域，回退 */ }
+      return { w: window.innerWidth || 1024, h: window.innerHeight || 768 };
     };
-    const stopDrag = () => {
+
+    // 至少保留 KEEP 像素在视口内，保证永远抓得回来
+    const KEEP = 48;
+    const clampLeft = (v, vw) => {
+      const width = iframe.offsetWidth || 520;
+      return Math.min(Math.max(v, -(width - KEEP)), Math.max(0, vw - KEEP));
+    };
+    const clampTop = (v, vh) => {
+      const height = iframe.offsetHeight || 400;
+      // 顶部不让拖到标题栏以上太多，否则标题栏被浏览器边缘挡住就没法再拖
+      return Math.min(Math.max(v, 0), Math.max(0, vh - KEEP));
+    };
+
+    const flushPosition = () => {
+      rafId = null;
+      if (pendingLeft === null && pendingTop === null) return;
+      if (pendingLeft !== null) iframe.style.left = `${pendingLeft}px`;
+      if (pendingTop !== null) iframe.style.top = `${pendingTop}px`;
+      pendingLeft = null;
+      pendingTop = null;
+    };
+
+    const applyMove = (clientX, clientY) => {
+      const { w: vw, h: vh } = viewport();
+      pendingLeft = clampLeft(dragStartLeft + (clientX - dragStartX), vw);
+      pendingTop = clampTop(dragStartTop + (clientY - dragStartY), vh);
+      if (rafId === null) rafId = requestAnimationFrame(flushPosition);
+    };
+
+    const endDrag = () => {
       if (!isDragging) return;
       isDragging = false;
-      iframe.style.transition = '';
+      activePointerId = null;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        flushPosition();
+      }
+      iframe.style.pointerEvents = '';
       doc.body.style.userSelect = '';
+      doc.body.style.cursor = '';
     };
-    ui.header.addEventListener('mousedown', e => {
+
+    const onHeaderPointerDown = e => {
+      // 只响应主键（鼠标左键 / 触摸 / 笔）
+      if (e.button !== undefined && e.button !== 0) return;
+      // 工具按钮区域不触发拖动
       if (e.target && e.target.closest && e.target.closest('.tools')) return;
+
       isDragging = true;
-      startX = e.screenX;
-      startY = e.screenY;
-      startLeft = parseFloat(iframe.style.left) || 0;
-      startTop = parseFloat(iframe.style.top) || 0;
-      iframe.style.transition = 'none';
+      activePointerId = e.pointerId;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      dragStartLeft = parseFloat(iframe.style.left) || 0;
+      dragStartTop = parseFloat(iframe.style.top) || 0;
+
+      // 指针捕获：即使移出 iframe，事件依旧回到 header
+      try {
+        ui.header.setPointerCapture(e.pointerId);
+      } catch (_) { /* 不支持则靠下面的兜底 */ }
+
+      // 兜底：拖动期间 iframe 不接收指针事件，避免丢帧
+      iframe.style.pointerEvents = 'none';
+      // 捕获阶段仍能收到 header 的事件，所以只对 body 禁用选择
       doc.body.style.userSelect = 'none';
+      doc.body.style.cursor = 'grabbing';
       e.preventDefault();
-    });
-    hostWindow.addEventListener('mousemove', onMove);
-    doc.addEventListener('mousemove', onMove);
-    hostWindow.addEventListener('mouseup', stopDrag);
-    doc.addEventListener('mouseup', stopDrag);
-    hostWindow.addEventListener('blur', stopDrag);
+    };
+
+    const onHeaderPointerMove = e => {
+      if (!isDragging) return;
+      if (activePointerId !== null && e.pointerId !== activePointerId) return;
+      e.preventDefault();
+      applyMove(e.clientX, e.clientY);
+    };
+
+    ui.header.addEventListener('pointerdown', onHeaderPointerDown);
+    ui.header.addEventListener('pointermove', onHeaderPointerMove);
+    ui.header.addEventListener('pointerup', endDrag);
+    ui.header.addEventListener('pointercancel', endDrag);
+    // 指针捕获失效时（老浏览器）用 document 级事件兜底
+    doc.addEventListener('pointermove', onHeaderPointerMove);
+    doc.addEventListener('pointerup', endDrag);
+    // 拖动时 iframe 是 pointer-events:none，事件会落到宿主页面，这里再兜一层
+    try {
+      window.addEventListener('pointermove', e => applyMove(e.clientX, e.clientY));
+      window.addEventListener('pointerup', endDrag);
+    } catch (_) { /* 忽略 */ }
+
+    // ---- 日志区滚动兜底 ----
+    //
+    // CSS 层已经用 min-height:0 + overflow-y:auto 保证了滚动（见 .body 注释），
+    // 这里再补一层 JS 兜底，因为「内部不能上下滑动」是上游长期存在的实测问题。
+    //
+    // 实测结论（Chromium）：在可滚动元素上，wheel 事件派发前浏览器**已经**
+    // 应用了原生滚动。所以必须用 scrollTop 的**变更量**判断是否生效，
+    // 不能拿「赋值前后有没有变」当标准 —— 那时值已经变过了。
+    // 只有原生滚动没生效（变更量为 0）才手动接管，避免双重滚动。
+    doc.addEventListener('wheel', e => {
+      const area = ui.body;
+      if (!area) return;
+      // 内容不足一屏，不需要滚动
+      if (area.scrollHeight <= area.clientHeight) return;
+
+      const before = area.scrollTop;
+      requestAnimationFrame(() => {
+        const delta = area.scrollTop - before;
+        if (delta === 0 && e.deltaY !== 0) {
+          area.scrollTop = before + e.deltaY;
+        }
+      });
+    }, { passive: true });
+
+    // 键盘可达性：日志区可聚焦并用上下键滚动
+    ui.body.setAttribute('tabindex', '0');
 
     // ---- 最小化 ----
-    const normalSize = { width: 540, height: 380 };
+    // 与 createPanel 里设置的实际尺寸保持一致，否则最小化还原后面板会变形
+    const normalSize = { width: 520, height: 400 };
     const miniSize = 64;
     let isMinimized = false;
     ui.minimality.addEventListener('click', () => {
@@ -1893,7 +2018,7 @@
     });
 
     ui.question.addEventListener('click', () => {
-      hostWindow.alert(
+      window.alert(
         'CQU 雨课堂刷课助手（研究适配版）\n\n'
         + '站点：courses.cqu.edu.cn（雨课堂专业版）\n'
         + '思路源自 Niuwh/yuketang-jiaoben (GPL-3.0)\n\n'
@@ -2021,13 +2146,13 @@
       Actions.stop();
       Player.unmute();          // 解除静音强制，把声音还给用户
       log('已停止刷课，页面即将刷新');
-      setTimeout(() => hostWindow.location.reload(), 400);
+      setTimeout(() => window.location.reload(), 400);
     };
 
     ui.btnReload.onclick = () => {
       Store.setPending(Route.classroomId());
       log('正在重载并恢复刷课...');
-      setTimeout(() => hostWindow.location.reload(), 400);
+      setTimeout(() => window.location.reload(), 400);
     };
 
     // ---- 启动按钮 ----
