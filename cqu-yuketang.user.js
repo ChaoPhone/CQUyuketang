@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         重庆大学雨课堂刷课助手 (CQU 适配版)
-// @namespace    https://courses.cqu.edu.cn/
+// @name         CQU 课程页面助手
+// @namespace    https://github.com/ChaoPhone/CQUyuketang
 // @version      1.1.1
-// @description  适配重庆大学在线课程平台（courses.cqu.edu.cn）的自动播放助手，仅供个人学习使用。思路源自开源项目 Niuwh/yuketang-jiaoben。
-// @author       CQU 适配版
+// @description  在线课程页面辅助脚本：自动播放音视频、设置倍速与静音、提供页面结构自检。仅供个人学习与技术研究使用。
+// @author       ChaoPhone
 // @license      GPL-3.0
 // @match        *://courses.cqu.edu.cn/*
 // @run-at       document-start
@@ -18,12 +18,30 @@
 // ==/UserScript==
 
 /*
- * ⚠️ 声明
- *   来源：思路、面板交互与 pro/v2 双路线架构来自开源项目
- *         https://github.com/Niuwh/yuketang-jiaoben  (GPL-3.0)
- *         本仓库是针对重庆大学站点的适配分支，遵循同一许可证。
- *   用途：仅供个人学习使用。请勿用于商业用途、请勿传播牟利。
- *         使用者需自行承担一切后果。
+ * ============================================================================
+ *  免责声明（请先阅读）
+ * ----------------------------------------------------------------------------
+ *  1. 本脚本是个人独立开发的开源项目，与重庆大学及其任何院系、部门、
+ *     教职员工无关，未获得也未申请其授权、认可、赞助或背书。
+ *     脚本中出现的学校名称与域名，仅用于客观说明适配的技术环境，
+ *     不表示任何形式的关联、合作或官方身份。
+ *
+ *  2. 仅供个人学习、技术研究与交流使用。不得用于商业用途，
+ *     不得转售、不得用于牟利、不得作为付费服务提供。
+ *     使用者应自行确认使用行为符合所在学校的学生行为规范与学术诚信要求；
+ *     如学校对自动化工具的使用有明确规定，请以学校规定为准。
+ *     使用者需自行承担一切后果，作者不承担任何责任。
+ *
+ *  3. 完全在本地浏览器运行，不收集、不上传任何个人信息；
+ *     不接触、不读取、不代填账号与密码；不伪造、不篡改学习记录或成绩。
+ *     唯一的对外请求是你自行配置的大模型 API，由你的浏览器直接发出。
+ *
+ *  4. 如本脚本无意侵犯了任何个人或机构的合法权益，请联系删除。
+ *
+ *  许可证：GPL-3.0
+ *  思路、面板交互与双路线架构源自开源项目：
+ *      https://github.com/Niuwh/yuketang-jiaoben
+ * ============================================================================
  */
 
 /*
@@ -44,7 +62,7 @@
 
 /*
  * ============================================================================
- *  重庆大学雨课堂刷课助手 —— CQU 研究适配版
+ *  CQU 课程页面助手 —— 在线课程页面辅助脚本
  * ----------------------------------------------------------------------------
  *  思路与面板交互源自：https://github.com/Niuwh/yuketang-jiaoben (GPL-3.0)
  *
@@ -578,7 +596,7 @@
       return r?.classroomId || '';
     },
 
-    /** 是否是可刷课的学习页 */
+    /** 是否为已适配的课程学习页 */
     isLearningPage() {
       return Boolean(this.current());
     },
@@ -778,7 +796,7 @@
         时间: new Date().toLocaleString(),
         版本: Config.version,
         地址: location.href,
-        路由: route || '未能解析（当前不是 CQU 雨课堂学习页？）',
+        路由: route || '未能解析（当前不是已适配的课程学习页）',
         路线: route ? Runner.labelOf(route) : '-',
         当前进度锚点: marker.text || '(未找到)',
         判定完成: marker.done,
@@ -817,7 +835,7 @@
     text() {
       const r = this.report();
       const L = [];
-      L.push('===== CQU 雨课堂助手 诊断报告 =====');
+      L.push('===== 课程页面助手 诊断报告 =====');
       L.push(`版本    : v${r['版本']}`);
       L.push(`时间    : ${r['时间']}`);
       L.push(`地址    : ${r['地址']}`);
@@ -1035,7 +1053,7 @@
      *
      * 关键点：静音后 Chrome 允许无手势自动播放，所以先静音再 play()。
      * 万一仍被拦截（Firefox / Safari 策略更严），挂一次性用户手势监听 ——
-     * 用户点一下页面任意位置就自动开始，不需要再点一次「开始刷课」。
+     * 用户点一下页面任意位置就自动开始，不需要再点一次「开始播放」。
      */
     async kickstart(media) {
       if (!media) return false;
@@ -1758,7 +1776,7 @@
           <div class="brand">
             <div class="brand-mark">CQU</div>
             <div class="brand-text">
-              <span class="brand-title">雨课堂助手</span>
+              <span class="brand-title">课程页面助手</span>
               <span class="brand-sub">courses.cqu.edu.cn</span>
             </div>
           </div>
@@ -1824,7 +1842,7 @@
           <button class="btn" id="btn-reload">重载</button>
           <button class="btn btn-quiet" id="btn-clear">清除</button>
           <button class="btn btn-quiet" id="btn-stop">停止</button>
-          <button class="btn btn-primary" id="btn-start">开始刷课</button>
+          <button class="btn btn-primary" id="btn-start">开始播放</button>
         </div>
       </div>
     </body></html>`);
@@ -2019,10 +2037,15 @@
 
     ui.question.addEventListener('click', () => {
       window.alert(
-        'CQU 雨课堂刷课助手（研究适配版）\n\n'
-        + '站点：courses.cqu.edu.cn（雨课堂专业版）\n'
-        + '思路源自 Niuwh/yuketang-jiaoben (GPL-3.0)\n\n'
-        + '仅供学习交流，请合理使用。'
+        `CQU 课程页面助手 v${Config.version}\n\n`
+        + '自动播放在线课程音视频、设置倍速与静音、提供页面结构自检。\n\n'
+        + '本脚本为个人独立开发的开源项目，与重庆大学及其任何院系、\n'
+        + '部门、教职员工无关，未获得也未申请其授权或背书。\n\n'
+        + '仅供个人学习与技术研究使用，不得用于商业用途或牟利。\n'
+        + '请自行确认使用行为符合所在学校的学生行为规范与学术诚信要求。\n'
+        + '使用者需自行承担一切后果。\n\n'
+        + '完全本地运行，不收集任何个人信息。\n\n'
+        + 'GPL-3.0　思路源自 Niuwh/yuketang-jiaoben'
       );
     });
 
@@ -2106,7 +2129,7 @@
 
     ui.btnClear.onclick = () => {
       Store.clearAll();
-      ok('已清除刷课进度与跳转缓存');
+      ok('已清除本地进度与跳转记录');
     };
 
     ui.btnDiag.onclick = async () => {
@@ -2145,13 +2168,13 @@
       Store.clearPending();
       Actions.stop();
       Player.unmute();          // 解除静音强制，把声音还给用户
-      log('已停止刷课，页面即将刷新');
+      log('已停止，页面即将刷新');
       setTimeout(() => window.location.reload(), 400);
     };
 
     ui.btnReload.onclick = () => {
       Store.setPending(Route.classroomId());
-      log('正在重载并恢复刷课...');
+      log('正在重载并恢复...');
       setTimeout(() => window.location.reload(), 400);
     };
 
@@ -2160,11 +2183,11 @@
     let running = false;
     const invokeStart = () => {
       if (running) {
-        log('已在刷课中，忽略重复点击');
+        log('已在运行中，忽略重复点击');
         return;
       }
       running = true;
-      ui.btnStart.innerText = '刷课中';
+      ui.btnStart.innerText = '播放中';
       ui.btnStart.disabled = true;
       log('启动中...');
       if (startHandler) {
@@ -2182,9 +2205,9 @@
       start() {
         invokeStart();
       },
-      resetStartButton(text = '开始刷课') {
+      resetStartButton(text = '开始播放') {
         ui.btnStart.innerText = text;
-        const idle = text !== '刷课中...';
+        const idle = text !== '播放中';
         if (idle) running = false;
         ui.btnStart.disabled = !idle;
       },
@@ -2300,7 +2323,7 @@
         if (!leaves.length) {
           this.panel.warn('未找到课程目录节点，契约 leafList 全部未命中');
           this.panel.log('建议点 [诊断] 查看实际页面结构后反馈');
-          this.panel.resetStartButton('开始刷课');
+          this.panel.resetStartButton('开始播放');
           return;
         }
         this.panel.log(`目录共 ${leaves.length} 项（契约：${this.leafSelector}），游标 ${this.cursor}`);
@@ -2355,7 +2378,7 @@
       if (step >= this.maxSteps) {
         this.panel.warn(`已达单次运行上限 ${this.maxSteps} 步，已停止以防死循环`);
       }
-      this.panel.resetStartButton('开始刷课');
+      this.panel.resetStartButton('开始播放');
     }
 
     advanceCursor() {
@@ -2441,7 +2464,7 @@
         return;
       }
       this.panel.log('无法返回目录页，请手动确认');
-      this.panel.resetStartButton('开始刷课');
+      this.panel.resetStartButton('开始播放');
     }
 
     /** 作业叶子 */
@@ -2645,11 +2668,11 @@
         const items = list.length ? [...list[0].children] : [];
         if (!items.length) {
           this.panel.warn(`未找到课程列表（契约 v2LogList 未命中，当前：${selector || '无'}）`);
-          this.panel.resetStartButton('开始刷课');
+          this.panel.resetStartButton('开始播放');
           return;
         }
         if (this.outside >= items.length) {
-          this.panel.ok('课程已刷完');
+          this.panel.ok('课程已全部处理完毕');
           this.panel.resetStartButton('已完成');
           Store.removeProgress(this.baseUrl);
           Store.clearPending();
@@ -2688,7 +2711,7 @@
         }
         return; // 已跳转到学习页，由新一轮 run() 接管
       }
-      this.panel.resetStartButton('开始刷课');
+      this.panel.resetStartButton('开始播放');
     }
   }
 
@@ -2726,7 +2749,7 @@
       if (r.type === 'exercise' || r.type === 'homework') {
         this.panel.warn('作业/练习类页面暂不自动作答，仅提供诊断');
         this.panel.log('如需适配请点 [诊断] 反馈结构');
-        this.panel.resetStartButton('开始刷课');
+        this.panel.resetStartButton('开始播放');
         return;
       }
 
@@ -2739,7 +2762,7 @@
         this.panel.warn('未找到 video/audio 元素，无法自动播放');
         this.panel.log('可能原因：页面还在加载、播放器在跨域 iframe 内、或该节点不是媒体类型');
         this.panel.log('可点 [诊断] 查看可穿透根数量与媒体状态');
-        this.panel.resetStartButton('开始刷课');
+        this.panel.resetStartButton('开始播放');
         return;
       }
 
@@ -2829,7 +2852,7 @@
         return;
       }
 
-      this.panel.ok('本节点处理完毕（未做跳转，请在上层目录页点击「开始刷课」继续）');
+      this.panel.ok('本节点处理完毕（未跳转，请在上层页面点击「开始播放」继续）');
       this.panel.resetStartButton('已完成');
     }
   }
@@ -2844,9 +2867,9 @@
     const classroomId = Route.classroomId();
 
     if (!route) {
-      panel.warn('当前页面不是 CQU 雨课堂学习页');
+      panel.warn('当前页面不是已适配的课程学习页');
       panel.log('请进入 /pro/lms/<sign>/<classroom_id> 或 /v2/web/studentLog/<id> 后重试');
-      panel.resetStartButton('开始刷课');
+      panel.resetStartButton('开始播放');
       return;
     }
 
@@ -2863,9 +2886,9 @@
     } else if (route.kind === 'pro-ai') {
       panel.warn('专业版 AI 学习空间页面暂未适配，仅提供诊断信息');
       panel.log('请点击 [诊断] 并把结果反馈，以便补充适配');
-      panel.resetStartButton('开始刷课');
+      panel.resetStartButton('开始播放');
     } else {
-      panel.resetStartButton('开始刷课');
+      panel.resetStartButton('开始播放');
     }
   }
 
@@ -2900,7 +2923,7 @@
       } else {
         panel.warn('当前页面未匹配到雨课堂路由，请进入课程学习页');
       }
-      panel.log('点击右下角「开始刷课」启动自动播放');
+      panel.log('点击右下角「开始播放」启动');
 
       // 诊断入口：?cqu_diag=1
       if (new URLSearchParams(location.search).get('cqu_diag') === '1') {
@@ -2911,7 +2934,7 @@
       // 跨页自动恢复
       const pending = Store.getPending();
       if (pending && route && pending.classroomId === Route.classroomId()) {
-        panel.log(`检测到跨页跳转，1.2s 后自动恢复刷课（课堂 ${pending.classroomId}）`);
+        panel.log(`检测到跨页跳转，1.2s 后自动恢复（课堂 ${pending.classroomId}）`);
         setTimeout(() => panel.start(), 1200);
       }
     } catch (err) {
@@ -2922,7 +2945,7 @@
         const tip = document.createElement('div');
         tip.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;background:#b91c1c;color:#fff;'
           + 'padding:10px 14px;border-radius:6px;font:13px/1.6 system-ui,sans-serif;max-width:520px;white-space:pre-wrap';
-        tip.textContent = `CQU 雨课堂助手面板挂载失败\n${err?.message || err}\n详情见控制台（F12）`;
+        tip.textContent = `课程页面助手面板挂载失败\n${err?.message || err}\n详情见控制台（F12）`;
         (document.body || document.documentElement).appendChild(tip);
       } catch (_) { /* 连提示都挂不上就只能看控制台了 */ }
     }

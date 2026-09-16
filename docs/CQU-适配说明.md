@@ -1,8 +1,11 @@
-# CQU 适配说明
+# 技术适配说明
+
+> 本文为纯技术文档，记录站点适配的调研与实现过程。
+> 项目定位与免责声明请见 [README](../README.md)。
 
 本文记录把 [Niuwh/yuketang-jiaoben](https://github.com/Niuwh/yuketang-jiaoben) 的思路
-落到 `https://courses.cqu.edu.cn/` 的完整过程：调研证据、真实路由、DOM 契约、
-以及第一个测试用例（AI 学习空间视频页）的实现。
+适配到 `courses.cqu.edu.cn` 的完整过程：调研证据、真实路由、DOM 契约，
+以及首个验证用例（AI 学习空间视频页）的实现。
 
 ---
 
