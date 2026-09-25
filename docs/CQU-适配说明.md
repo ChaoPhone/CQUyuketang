@@ -128,13 +128,13 @@ leafList: [
 document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText
 ```
 
-本版改成「找那个写着进度的元素」，三级降级：
+v1.2.0 只读取明确的学习进度容器：
 
 1. 契约命中 `.progress-wrap .text` 等已知容器；
-2. **全页文本扫描** —— TreeWalker 找文本形如 `100%` / `12/12` / `已完成` 的最深节点；
-3. 最后才回退上游的绝对选择器。
+2. 回退上游的绝对选择器；
+3. 排除目录条目与隐藏元素，不再扫描正文中的进度形态文本。
 
-只要页面上**还显示着进度文本**就能工作，不依赖 DOM 层级。
+仅接受 100%、明确完成状态或完整进度比；98%/99% 不视为完成。无可信进度锚点时依赖媒体结束事件。
 
 完成判定同时用两条通道，谁先到算谁：
 
@@ -309,7 +309,7 @@ Player.waitUntilDone(media)                  ended 事件 或 进度文本，谁
 **第一步：确认脚本执行了没有。** F12 → 控制台 → 刷新页面，找这行：
 
 ```
-[CQU雨课堂] 脚本已执行 v1.1.1
+[CQU雨课堂] 脚本已执行 v1.2.0
 ```
 
 | 现象 | 结论 | 处理 |
@@ -357,7 +357,7 @@ v1.0.1 的处理：
 路由: {kind: "ai", classroomId: "31317597", type: "video", leafId: "84703555",
        nodeId: "16380147", fromProIframe: true, isChapter: true, isCatalog: false}
 路线: AI学习空间 (ai-workspace/lms-graph/31317597/video/84703555) [专业版内嵌播放器]
-进度锚点: 12% | 完成 = false | 来源 = text-scan
+进度锚点: 12% | 完成 = false | 来源 = .progress-wrap .text
 媒体: {命中根: "shadow", 类型: "video", 承载iframe: false, 可穿透根数量: 3, 状态: {...}}
 ```
 

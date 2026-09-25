@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CQU 课程页面助手
 // @namespace    https://github.com/ChaoPhone/CQUyuketang
-// @version      1.1.1
+// @version      1.2.0
 // @description  在线课程页面辅助脚本：自动播放音视频、设置倍速与静音、提供页面结构自检。仅供个人学习与技术研究使用。
 // @author       ChaoPhone
 // @license      GPL-3.0
@@ -95,7 +95,7 @@
    * ========================================================================== */
 
   const Config = {
-    version: '1.1.1',
+    version: '1.2.0',
     playbackRate: 2,          // 视频倍速
     pptInterval: 3000,        // PPT 自动翻页间隔(ms)
     pollInterval: 1000,       // 通用轮询间隔
@@ -296,6 +296,7 @@
       } catch (_) { /* 忽略单次探测异常 */ }
       while (Date.now() - start <= timeout) {
         await this.sleep(interval);
+        if (Actions.stopped) return false;
         try {
           if (checker()) return true;
         } catch (_) { /* 忽略单次探测异常 */ }
@@ -309,17 +310,18 @@
 
     /**
      * 完成度文本判定。
-     * 覆盖：100% / 99% / 98% / 已完成 / 已读 / 已学完，以及 "12/12" 形式的进度比。
+     * 仅接受完整进度或明确完成状态；未完成状态优先。
      */
     isDone(text) {
       const t = this.normalized(text);
       if (!t) return false;
-      if (/100%|9[89]%|已完成|已读|已学完|已观看/.test(t)) return true;
+      if (this.isExplicitlyUndone(t)) return false;
+      if (/(?:^|[^\d.])100\s*%|已完成|已读|已学完|已观看/.test(t)) return true;
       const m = t.match(/(\d+)\s*\/\s*(\d+)/);
       if (m) {
         const cur = parseInt(m[1], 10);
         const total = parseInt(m[2], 10);
-        return total > 0 && cur >= total;
+        return total > 0 && cur === total;
       }
       return false;
     },
@@ -367,7 +369,7 @@
 
     /** 取视频/音频时长，转成等待超时（至少 10s，给足缓冲） */
     async getMediaTimeout() {
-      const el = document.querySelector('video') || document.querySelector('audio');
+      const el = Media.find().el;
       if (!el) return Config.maxStepTimeoutFallback;
       let duration = Number(el.duration);
       if (!Number.isFinite(duration) || duration <= 0) {
@@ -460,46 +462,21 @@
     },
 
     /**
-     * 进度锚点解析：先按契约找，找不到就做「全页文本扫描」。
-     * 这是替代上游超长绝对选择器的关键兜底 —— 只要页面上还显示进度文本就能工作。
+     * 进度锚点解析：只使用明确的学习进度容器，不扫描正文和目录。
      */
     completionMarker(excludeRoot = null) {
-      // 1) 契约优先
-      const hit = this.one(DOM.progressWrap);
-      if (hit.node && Utils.isDone(hit.node.innerText)) {
-        return { text: Utils.normalized(hit.node.innerText), done: true, node: hit.node, via: hit.selector };
-      }
-
-      // 2) 全页扫描：找「最深」的、文本像进度的小节点
-      const re = /(\d{1,3}\s*%|\d+\s*\/\s*\d+|已完成|已读|已学完)/;
-      let best = null;
-      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        const text = Utils.normalized(node.nodeValue);
-        if (!text || text.length > 40 || !re.test(text)) continue;
-        const el = node.parentElement;
-        if (!el) continue;
-        if (excludeRoot && excludeRoot.contains(el)) continue;
-        try {
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0 && rect.height === 0) continue;
-        } catch (_) {
-          continue;
+      // 只读学习内容的明确进度，目录、课件正文中的 100% 不能证明当前媒体完成。
+      const selectors = ['.progress-wrap .text', '.progress-wrap', LEGACY_ABSOLUTE.proStatus];
+      for (const selector of selectors) {
+        for (const node of document.querySelectorAll(selector)) {
+          if (excludeRoot?.contains(node)) continue;
+          if (node.closest('.leaf_list__wrap, [class*="catalog"], [class*="chapter"], .activity__wrap')) continue;
+          if (!node.getClientRects().length) continue;
+          const text = Utils.normalized(node.innerText);
+          if (text) return { text, done: Utils.isDone(text), node, via: selector };
         }
-        // 取文本最短的（最贴近纯进度文本）
-        if (!best || text.length < best.text.length) best = { text, node: el };
       }
-      // 3) 兜底：上游绝对选择器
-      if (!best) {
-        const legacy = document.querySelector(LEGACY_ABSOLUTE.proStatus);
-        if (legacy) {
-          const text = Utils.normalized(legacy.innerText);
-          return { text, done: Utils.isDone(text), node: legacy, via: 'legacy-absolute' };
-        }
-        return { text: '', done: false, node: null, via: null };
-      }
-      return { text: best.text, done: Utils.isDone(best.text), node: best.node, via: 'text-scan' };
+      return { text: '', done: false, node: null, via: null };
     },
   };
 
@@ -639,10 +616,11 @@
 
     getFeatureConf() {
       const saved = this._get(Config.storageKeys.feature, {}) || {};
+      const rate = Number(saved.rate);
       const conf = {
-        autoAI: saved.autoAI ?? false,
-        autoComment: saved.autoComment ?? false,
-        rate: saved.rate ?? Config.playbackRate,
+        autoAI: saved.autoAI === true,
+        autoComment: saved.autoComment === true,
+        rate: Number.isFinite(rate) && rate >= 1 && rate <= 4 ? rate : Config.playbackRate,
       };
       localStorage.setItem(Config.storageKeys.feature, JSON.stringify(conf));
       return conf;
@@ -652,11 +630,12 @@
     },
 
     getCursor() {
-      const v = localStorage.getItem(Config.storageKeys.leafCursor);
-      return v ? Number(v) : 0;
+      const saved = this._get(Config.storageKeys.leafCursor, null);
+      return saved?.classroomId === Route.classroomId() && Number.isInteger(saved.index) && saved.index >= 0
+        ? saved.index : 0;
     },
     setCursor(n) {
-      localStorage.setItem(Config.storageKeys.leafCursor, String(n));
+      localStorage.setItem(Config.storageKeys.leafCursor, JSON.stringify({ classroomId: Route.classroomId(), index: n }));
     },
     clearCursor() {
       localStorage.removeItem(Config.storageKeys.leafCursor);
@@ -691,7 +670,7 @@
       const prev = this.getPending() || {};
       localStorage.setItem(Config.storageKeys.pending, JSON.stringify({
         classroomId,
-        returnUrl: returnUrl || prev.returnUrl || '',
+        returnUrl: returnUrl || (prev.classroomId === classroomId ? prev.returnUrl : '') || '',
         ts: Date.now(),
       }));
     },
@@ -702,7 +681,7 @@
     clearAll() {
       Store.clearCursor();
       Store.clearPending();
-      Store.removeProgress(location.href);
+      Store.removeProgress(location.href.split('?')[0]);
       localStorage.removeItem(Config.storageKeys.pending);
     },
   };
@@ -718,7 +697,13 @@
    * 都是**特定页面类型专用**的：在视频播放页上它们本来就该为空。
    * 如果不做区分，一次诊断会报出十几条「未命中」，使用者会误以为脚本坏了。
    */
-  const CRITICAL_CONTRACTS = ['video', 'audio', 'progressWrap', 'leafList'];
+  function criticalContracts() {
+    const route = Route.current();
+    if (!route) return [];
+    if (route.isCatalog) return [route.kind === 'v2' ? 'v2LogList' : 'leafList'];
+    if (['video', 'audio'].includes(route.type) && !Media.find().el) return [route.type];
+    return [];
+  }
 
   const Diag = {
     /** 逐条契约体检 */
@@ -855,6 +840,11 @@
       L.push(`可穿透根: ${m['可穿透根数量']}`);
       L.push(`状态    : ${m['状态'] ? JSON.stringify(m['状态']) : '(无)'}`);
       L.push('');
+      L.push('--- 播放守护 ---');
+      L.push(`已安装  : ${Guard._installed}`);
+      L.push(`守护中  : ${Guard._shouldRun()}`);
+      L.push(`最短接管时长: ${MIN_GUARD_DURATION}s（低于此值不接管，避免干扰题目弹窗）`);
+      L.push('');
       L.push('--- DOM 契约 ---');
       const hit = r['契约'].filter(c => c.note === 'OK');
       const miss = r['契约'].filter(c => c.note !== 'OK');
@@ -922,14 +912,18 @@
 
   const Media = {
     guessLeafType({ iconHref = '', className = '', text = '' }) {
-      const hay = `${iconHref} ${className} ${text}`.toLowerCase();
+      if (iconHref || className) {
+        const iconType = this.guessLeafType({ text: `${iconHref} ${className}` });
+        if (iconType !== 'unknown') return iconType;
+      }
+      const hay = text.toLowerCase();
+      if (/kaoshi|exam|考试|测验/.test(hay)) return 'exam';
+      if (/ketang|live|课堂|直播/.test(hay)) return 'live';
       if (/shipin|video|视频/.test(hay)) return 'video';
       if (/audio|音频|yinpin/.test(hay)) return 'audio';
       if (/tuwen|graph|图文|richtext/.test(hay)) return 'graph';
       if (/taolun|forum|讨论/.test(hay)) return 'forum';
       if (/zuoye|homework|作业/.test(hay)) return 'homework';
-      if (/kaoshi|exam|考试|测验/.test(hay)) return 'exam';
-      if (/ketang|live|课堂|直播/.test(hay)) return 'live';
       if (/kejian|courseware|课件|ppt/.test(hay)) return 'courseware';
       if (/piliang|批量/.test(hay)) return 'batch';
       return 'unknown';
@@ -1040,6 +1034,21 @@
     _muted: false,
     _muteTimer: null,
     _muteVolumeHandler: null,
+    _volumes: new Map(),
+    _rate: Config.playbackRate,
+
+    stop() {
+      this._cancelKickstart?.();
+      clearInterval(this._rateTimer);
+      this._rateTimer = null;
+      this.unmute();
+    },
+
+    /** 完整停止：解除静音强制并卸载播放守护 */
+    shutdown() {
+      this.stop();
+      Guard.uninstall();
+    },
 
     isNearEnd(media, threshold = 1) {
       if (!media) return false;
@@ -1060,6 +1069,7 @@
       this.mute(media);
 
       const attempt = async () => {
+        if (Actions.stopped) return false;
         try {
           await media.play();
           return !media.paused;
@@ -1073,6 +1083,7 @@
       Actions.log('浏览器拦截了自动播放，点一下页面任意位置即可开始（只需一次）');
       return new Promise(resolve => {
         let settled = false;
+        let timer;
         const once = async () => {
           if (settled) return;
           settled = true;
@@ -1081,6 +1092,8 @@
           resolve(okPlay);
         };
         const cleanup = () => {
+          clearTimeout(timer);
+          this._cancelKickstart = null;
           document.removeEventListener('click', once, true);
           document.removeEventListener('keydown', once, true);
           document.removeEventListener('touchstart', once, true);
@@ -1089,12 +1102,13 @@
         document.addEventListener('keydown', once, true);
         document.addEventListener('touchstart', once, true);
         // 15s 内没有手势就放弃等待，交回主流程
-        setTimeout(() => {
+        this._cancelKickstart = () => {
           if (settled) return;
           settled = true;
           cleanup();
           resolve(false);
-        }, 15000);
+        };
+        timer = setTimeout(this._cancelKickstart, 15000);
       });
     },
 
@@ -1123,13 +1137,14 @@
     /** 倍速：优先驱动 xt 播放器 UI（上游做法），否则直接改 playbackRate */
     applySpeed(rate) {
       const r = rate || Store.getFeatureConf().rate || Config.playbackRate;
+      this._rate = r;
       const speedBtnRes = Resolve.one(['xt-speedlist xt-button', 'xt-speedlist > * > *']);
       const speedWrap = Resolve.one(DOM.speedButton);
       if (speedBtnRes.node && speedWrap.node) {
         const btn = speedBtnRes.node;
         btn.setAttribute('data-speed', r);
-        btn.setAttribute('keyt', `${r}.00`);
-        btn.innerText = `${r}.00X`;
+        btn.setAttribute('keyt', Number(r).toFixed(2));
+        btn.innerText = `${Number(r).toFixed(2)}X`;
         try {
           const ev = document.createEvent('MouseEvent');
           ev.initMouseEvent('mousemove', true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
@@ -1148,9 +1163,9 @@
       if (!this._rateTimer) {
         this._rateTimer = setInterval(() => {
           const media = Media.find().el;
-          if (media && Math.abs(media.playbackRate - r) > 0.01) {
+          if (media && Math.abs(media.playbackRate - this._rate) > 0.01) {
             try {
-              media.playbackRate = r;
+              media.playbackRate = this._rate;
             } catch (_) { /* ignore */ }
           }
         }, 5000);
@@ -1173,6 +1188,8 @@
       this._muted = true;
 
       const apply = el => {
+        if (!el) return;
+        if (!this._volumes.has(el)) this._volumes.set(el, el.volume);
         try {
           // 先设 muted 属性：这是唯一能压住 volume 的开关
           el.muted = true;
@@ -1218,12 +1235,13 @@
         document.removeEventListener('volumechange', this._muteVolumeHandler, true);
         this._muteVolumeHandler = null;
       }
-      const el = Media.find().el;
-      if (el) {
+      for (const [el, volume] of this._volumes) {
         try {
+          el.volume = volume;
           el.muted = false;
         } catch (_) { /* ignore */ }
       }
+      this._volumes.clear();
     },
 
     applyMediaDefault(media, rate) {
@@ -1243,7 +1261,9 @@
      */
     observePause(media, shouldResume = () => true) {
       if (!media) return () => {};
-      const canResume = () => shouldResume() && !media.ended && !this.isNearEnd(media);
+      let active = true;
+      let retryTimer;
+      const canResume = () => active && !Actions.stopped && shouldResume() && !media.ended;
 
       const tryPlay = () => {
         if (!canResume()) return;
@@ -1251,7 +1271,8 @@
           if (!canResume()) return;
           /* eslint-disable-next-line no-console */
           console.warn('[CQU雨课堂] 自动播放失败，3s 后重试:', e?.message || e);
-          setTimeout(tryPlay, 3000);
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(tryPlay, 3000);
         });
       };
       tryPlay();
@@ -1276,6 +1297,8 @@
       }
 
       return () => {
+        active = false;
+        clearTimeout(retryTimer);
         media.removeEventListener('pause', onPause);
         clearInterval(timer);
         if (observer) observer.disconnect();
@@ -1304,8 +1327,15 @@
     /**
      * 统一「播完」等待：进度文本 与 ended 事件 双通道，谁先到算谁。
      * 这是相对上游的实质改进 —— 上游只等进度文本，文本选择器一漂移就死等超时。
+     *
+     * 返回状态字符串（不再混用布尔值，避免判定混乱）：
+     *   'done'     正常播完（ended 事件或进度文本达标）
+     *   'stalled'  时间轴长时间未推进，判定卡死
+     *   'timeout'  超过按媒体时长推算的上限
+     *   'left'     页面已跳转或被用户停止
      */
-    async waitUntilDone(media, { onTick, timeout } = {}) {
+    async waitUntilDone(media, { onTick, timeout, getMedia = () => Media.find().el || media } = {}) {
+      const waitingUrl = location.href;
       const limit = timeout || await Utils.getMediaTimeout();
       const start = Date.now();
       let done = false;
@@ -1314,27 +1344,57 @@
       };
       if (media) media.addEventListener('ended', onEnded, { once: true });
 
+      // ---- 进度停滞检测 ----
+      // 处理「既没暂停、也没播完，但时间轴就是不动」这种最难受的卡住状态
+      // （播放器被替换、题目弹窗遮挡、平台停止计分后静默挂起）。
+      // 连续 STALL_LIMIT 次轮询都没前进就结束等待，避免死等到超时。
+      const STALL_LIMIT = 30;      // 约 24 秒（轮询间隔 800ms）
+      let lastTime = -1;
+      let stalled = 0;
+
       try {
         while (Date.now() - start < limit) {
+          if (Actions.stopped) return 'left';
+          if (location.href !== waitingUrl) return 'left';
           if (onTick) onTick();
+          const current = getMedia();
+          if (current && current !== media) {
+            media?.removeEventListener('ended', onEnded);
+            media = current;
+            done = false;
+            stalled = 0;
+            lastTime = -1;
+            media.addEventListener('ended', onEnded, { once: true });
+          }
           const popup = await Utils.dismissPopups();
-          if (popup) Actions.log(`已关闭挂机弹窗（${popup}）`);
+          if (popup) {
+            Actions.log(`已关闭挂机弹窗（${popup}）`);
+            stalled = 0;      // 弹窗刚关掉，给它一次重新推进的机会
+          }
 
-          if (done || (media && media.ended)) return true;
+          if (done || (media && media.ended)) return 'done';
 
           const marker = Resolve.completionMarker();
-          if (marker.done) return true;
+          if (marker.done) return 'done';
 
-          // 时间显示相等也视为播完（部分播放器不派发 ended）
-          const timeRes = Resolve.one(DOM.timeDisplay);
-          if (timeRes.node) {
-            const [now, total] = Utils.normalized(timeRes.node.innerText).split('/').map(s => s.trim());
-            if (now && total && now === total) return true;
+          // ---- 卡死判定 ----
+          if (media) {
+            const t = Number(media.currentTime) || 0;
+            if (t > lastTime + 0.2) {
+              lastTime = t;
+              stalled = 0;
+            } else if (!media.paused) {
+              stalled++;      // 没暂停却没前进，才算真卡住
+            }
+            if (stalled >= STALL_LIMIT) {
+              Actions.log('时间轴长时间未推进，判定为卡死');
+              return 'stalled';
+            }
           }
 
           await Utils.sleep(800);
         }
-        return false;
+        return 'timeout';
       } finally {
         if (media) media.removeEventListener('ended', onEnded);
       }
@@ -1342,18 +1402,335 @@
   };
 
   /* ==========================================================================
-   * 8. 防切屏
+   * 8. 播放守护（capture 阶段拦截）
    *
-   * 上游做法：拦截 visibilitychange / blur / pagehide 的监听注册。
-   * 保留，但仅在 pro 路线启用，并整体 try/catch（部分浏览器不允许覆写）。
+   * 这是本次针对「经常卡住 / 无法连续播放」的核心改进。
+   *
+   * 为什么之前的实现会卡住：
+   *   旧实现是**被动兜底**，两条路径都有延迟漏洞：
+   *     - `video.addEventListener('pause', ...)` 是**冒泡阶段**监听，
+   *       平台若在冒泡阶段早期（更早注册）或捕获阶段就处理了 pause，
+   *       轮到我们时视频已经被暂停，甚至被替换/销毁；
+   *     - 5 秒轮询兜底意味着最长有 5 秒的暂停窗口，
+   *       平台可能在这个窗口内判定「离开」并停止上报进度，之后即使恢复播放也不再计分。
+   *   而且 `preventScreenCheck()` 是**点击开始后**才调用，那时平台早已注册完
+   *   自己的 `visibilitychange` 监听，拦不住了。
+   *
+   * 参考实现（hyper152/yuketang-and-CQU-Course-Helper）的关键洞见：
+   *   在 **捕获阶段** 用 `stopImmediatePropagation()` 把事件掐掉 ——
+   *   捕获监听在事件到达目标之前执行，因此**无论平台何时注册、注册在哪个阶段，
+   *   它的处理器都不会被调用**。再叠加 `HTMLMediaElement.prototype.pause` 覆写，
+   *   `video.pause()` 这条路径也被堵死。
+   *
+   * 补充一句实测结论：`pause` 事件本身是**不可取消**的（`cancelable === false`），
+   * 所以 `e.preventDefault()` 在 pause 上没有任何作用，真正生效的是
+   * `stopImmediatePropagation()` 加上主动 `play()`。
    * ========================================================================== */
 
+  /**
+   * 低于该时长（秒）的媒体不接管。
+   * 视频课中间可能弹出题目、播放提示音，这些短媒体若被强制播放会干扰界面。
+   */
+  const MIN_GUARD_DURATION = 30;
+
+  const Guard = {
+    _installed: false,
+    _shouldRun: () => false,
+    _preferredRate: () => Store.getFeatureConf().rate || Config.playbackRate,
+    _suppress: false,          // 我们自己触发的 pause 不当作「被平台暂停」
+    _watched: new WeakSet(),
+    _observer: null,
+    _stopStall: null,
+    _origPause: null,
+    _patchedProtos: [],
+
+    /**
+     * 该媒体元素当前是否处于我们守护的状态。
+     *
+     * 三条排除条件，避免误伤：
+     *   1. 已播完 / 快到结尾 —— 别和平台抢最后那一秒；
+     *   2. 用户已停止 —— 立刻放手；
+     *   3. **时长过短的元素** —— 视频课中间可能插入题目弹窗、提示音等
+     *      短媒体，若一并强制播放会干扰答题界面。只守护真正的课程媒体。
+     */
+    _isGuarded(el) {
+      if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) return false;
+      if (el.ended) return false;
+      if (Player.isNearEnd(el)) return false;
+      const dur = Number(el.duration);
+      if (Number.isFinite(dur) && dur > 0 && dur < MIN_GUARD_DURATION) return false;
+      return this._shouldRun();
+    },
+
+    /**
+     * 恢复播放。重新套用倍速与静音 —— 平台常借「暂停→改倍速→播放」
+     * 的机会把倍速改回 1x，这一步顺手纠回来。
+     */
+    _resume(el, why) {
+      if (!this._isGuarded(el)) return;
+      try {
+        el.muted = true;
+        el.volume = 0;
+        const rate = this._preferredRate();
+        if (Math.abs(el.playbackRate - rate) > 0.01) el.playbackRate = rate;
+      } catch (_) { /* ignore */ }
+
+      this._suppress = true;
+      const p = el.play();
+      if (p && p.catch) {
+        p.catch(() => { /* 交给下一次拦截或看门狗重试 */ })
+          .finally(() => { this._suppress = false; });
+      } else {
+        this._suppress = false;
+      }
+      Actions.log(`检测到暂停，已强制恢复（${why}）`);
+    },
+
+    install({ shouldRun, preferredRate } = {}) {
+      if (typeof shouldRun === 'function') this._shouldRun = shouldRun;
+      if (typeof preferredRate === 'function') this._preferredRate = preferredRate;
+      if (this._installed) return;
+      this._installed = true;
+
+      const doc = document;
+
+      // 优先取未被改写的原生方法：脚本在 document-start 运行，此处通常仍是原生
+      const rawAdd = doc.addEventListener.bind(doc);
+      this._rawAdd = rawAdd;
+
+      // ---- 1) pause 事件：捕获阶段掐断 + 立刻恢复 ----
+      rawAdd('pause', e => {
+        const el = e.target;
+        if (this._suppress) return;          // 我们自己暂停的，放行
+        if (!this._isGuarded(el)) return;
+        e.stopImmediatePropagation();        // 平台的 pause 处理器不会被调用
+        this._resume(el, '捕获阶段拦截 pause');
+      }, true);
+
+      // ---- 2) visibilitychange：捕获阶段掐断 + 兜底恢复 ----
+      rawAdd('visibilitychange', e => {
+        if (!this._shouldRun()) return;
+        e.stopImmediatePropagation();
+        const el = Media.find().el;
+        if (el && el.paused) this._resume(el, `可见性变为 ${doc.visibilityState}`);
+      }, true);
+
+      // ---- 3) play 事件：平台换源/重载时重新套用倍速与静音 ----
+      rawAdd('play', e => {
+        const el = e.target;
+        if (!this._isGuarded(el)) return;
+        try {
+          el.muted = true;
+          el.volume = 0;
+          const rate = this._preferredRate();
+          if (Math.abs(el.playbackRate - rate) > 0.01) {
+            el.playbackRate = rate;
+            Actions.log(`平台重载了播放器，已重新套用 ${rate}x 与静音`);
+          }
+        } catch (_) { /* ignore */ }
+      }, true);
+
+      // ---- 4) 覆写 pause()，堵住「平台直接调用 video.pause()」这条路径 ----
+      //
+      // 双路覆写，因为 Tampermonkey 的沙箱与页面可能是两套原型链：
+      //   a) unsafeWindow.HTMLMediaElement.prototype  —— 页面世界，平台调用走这里
+      //   b) 已存在媒体元素的 Object.getPrototypeOf(el) —— 兜底，确保命中实际对象
+      // 两处都打，并且都记录原始方法以便 uninstall 还原。
+      const installPausePatch = proto => {
+        if (!proto || !proto.pause || proto.__cquGuarded) return false;
+        const orig = proto.pause;
+        this._origPause = this._origPause || orig;
+        const self = this;
+        proto.pause = function patchedPause() {
+          if (self._isGuarded(this) && !self._suppress) {
+            Actions.log('已拦截平台的 pause() 调用');
+            self._resume(this, '拦截 pause() 调用');
+            return;
+          }
+          return orig.apply(this, arguments);
+        };
+        proto.__cquGuarded = true;
+        return true;
+      };
+
+      this._patchedProtos = [];
+      const tryInstallOn = proto => {
+        if (installPausePatch(proto)) this._patchedProtos.push(proto);
+      };
+
+      try {
+        const win = unsafeWindow;
+        tryInstallOn(win.HTMLMediaElement && win.HTMLMediaElement.prototype);
+      } catch (_) { /* ignore */ }
+
+      // 兜底：直接对页面上已有的媒体元素取原型
+      try {
+        const el = Media.find().el || document.querySelector('video') || document.querySelector('audio');
+        if (el) tryInstallOn(Object.getPrototypeOf(el));
+      } catch (_) { /* ignore */ }
+
+      if (!this._patchedProtos.length) {
+        Actions.log('未能覆写 pause()，将仅依赖事件拦截');
+      }
+
+      // ---- 5) 动态发现新增 / 被替换的媒体元素 ----
+      try {
+        this._observer = new MutationObserver(muts => {
+          for (const m of muts) {
+            for (const node of m.addedNodes) {
+              if (!node || node.nodeType !== 1) continue;
+              const found = [];
+              if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') found.push(node);
+              if (node.querySelectorAll) found.push(...node.querySelectorAll('video, audio'));
+              for (const el of found) {
+                if (this._watched.has(el)) continue;
+                this._watched.add(el);
+                if (this._isGuarded(el)) {
+                  Actions.log('发现新的播放器元素，已接管');
+                  this._resume(el, '新播放器元素');
+                }
+              }
+            }
+          }
+        });
+        this._observer.observe(doc.documentElement || doc, { childList: true, subtree: true });
+      } catch (_) { /* ignore */ }
+
+      // ---- 6) 卡死看门狗 ----
+      this._stopStall = this.startWatchdog();
+    },
+
+    /**
+     * 卡死看门狗。
+     *
+     * 处理「视频既没暂停也没播完，但时间轴不动」这种最难受的卡住状态
+     * （常见于：播放器被替换、题目弹窗遮住、平台停止计分后静默挂起）。
+     *
+     * 策略：停滞 STALL_MS → 主动 play() 一次；累计达到上限仍不动 → 刷新页面
+     * （刷新是参考实现 README 里给的「切后台后仍暂停」的解法，这里自动化）。
+     *
+     * 阈值挂在实例上而非闭包常量，便于测试注入更短的等待时间。
+     */
+    STALL_MS: 15000,
+    TICK_MS: 3000,
+    MAX_RECOVERIES: 3,
+
+    startWatchdog() {
+      let lastTime = -1;
+      let lastProgressAt = Date.now();
+      let recoveries = 0;
+
+      const timer = setInterval(() => {
+        const STALL_MS = this.STALL_MS;
+        const MAX_RECOVERIES = this.MAX_RECOVERIES;
+        if (!this._shouldRun()) {
+          lastProgressAt = Date.now();
+          lastTime = -1;
+          return;
+        }
+        const el = Media.find().el;
+        if (!el) {
+          lastProgressAt = Date.now();
+          return;
+        }
+        const t = Number(el.currentTime) || 0;
+
+        if (t > lastTime + 0.2) {
+          // 有推进，一切正常
+          lastTime = t;
+          lastProgressAt = Date.now();
+          recoveries = 0;
+          return;
+        }
+
+        lastTime = t;
+        if (el.paused) {
+          // 暂停状态由 pause 拦截负责，这里只记时间不重复处理
+          return;
+        }
+        if (Date.now() - lastProgressAt < STALL_MS) return;
+
+        // 确认卡住
+        lastProgressAt = Date.now();
+        recoveries++;
+        if (recoveries <= MAX_RECOVERIES) {
+          Actions.log(`播放停滞 ${STALL_MS / 1000}s，尝试恢复（第 ${recoveries} 次）`);
+          this._suppress = true;
+          try {
+            el.muted = true;
+            el.volume = 0;
+            el.playbackRate = this._preferredRate();
+            const p = el.play();
+            if (p && p.catch) p.catch(() => { /* 下一次再试 */ }).finally(() => { this._suppress = false; });
+            else this._suppress = false;
+          } catch (_) {
+            this._suppress = false;
+          }
+          // 顺便试试关掉可能挡住播放器的弹窗
+          Utils.dismissPopups().then(label => {
+            if (label) Actions.log(`已关闭遮挡弹窗（${label}）`);
+          });
+        } else {
+          Actions.log('多次恢复无效，刷新页面重试');
+          location.reload();
+        }
+      }, this.TICK_MS);
+
+      return () => clearInterval(timer);
+    },
+
+    /**
+     * 卸载守护：恢复被覆写的原型方法、断开观察者、停掉看门狗。
+     * 点「停止」时调用，避免脚本停止后仍在拦截平台的暂停行为。
+     */
+    uninstall() {
+      if (!this._installed) return;
+      this._installed = false;
+      this._shouldRun = () => false;
+
+      try {
+        this._observer?.disconnect();
+      } catch (_) { /* ignore */ }
+      this._observer = null;
+
+      try {
+        this._stopStall?.();
+      } catch (_) { /* ignore */ }
+      this._stopStall = null;
+
+      // 还原所有被覆写的原型（可能是 unsafeWindow 与页面两套原型链）
+      try {
+        for (const proto of this._patchedProtos || []) {
+          if (proto && proto.__cquGuarded) {
+            if (this._origPause) proto.pause = this._origPause;
+            delete proto.__cquGuarded;
+          }
+        }
+      } catch (_) { /* ignore */ }
+      this._patchedProtos = [];
+
+      this._watched = new WeakSet();
+      Actions.log('播放守护已卸载');
+    },
+  };
+
+  /* ==========================================================================
+   * 9. 防切屏（辅助手段，保留但不再作为主力）
+   *
+   * 说明：捕获阶段拦截（见上）才是主力。这里改 addEventListener 的做法
+   * 属于「堵注册口」，对已在页面早期注册过的监听无效，因此只在
+   * 捕获拦截之外作为补充。
+   * ========================================================================== */
+
+  let screenCheckInstalled = false;
   function preventScreenCheck() {
+    if (screenCheckInstalled) return;
     try {
       const win = unsafeWindow;
       const blacklist = new Set(['visibilitychange', 'blur', 'pagehide', 'webkitvisibilitychange']);
       const originalAdd = win.EventTarget.prototype.addEventListener;
       const originalRemove = win.EventTarget.prototype.removeEventListener;
+      screenCheckInstalled = true;
 
       win.EventTarget.prototype.addEventListener = function (type, listener, options) {
         if (blacklist.has(type) && (this === win.document || this === win)) {
@@ -1378,7 +1755,7 @@
   }
 
   /* ==========================================================================
-   * 9. AI 解题
+   * 10. AI 解题
    * ========================================================================== */
 
   const Solver = {
@@ -1483,9 +1860,13 @@
               data: JSON.stringify(body),
               onload: res => (res.status >= 200 && res.status < 300 ? handle(res) : fail(res)),
               onerror: () => reject(new Error('网络错误')),
+              timeout: 45000,
+              ontimeout: () => reject(new Error('请求超时')),
+              onabort: () => reject(new Error('请求已取消')),
             });
           } else {
             fetch(API_URL, {
+              signal: AbortSignal.timeout(45000),
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', ...authHeader },
               body: JSON.stringify(body),
@@ -1514,9 +1895,13 @@
             data: JSON.stringify(body),
             onload: res => (res.status >= 200 && res.status < 300 ? handle(res) : fail(res)),
             onerror: () => reject(new Error('网络错误')),
+            timeout: 45000,
+            ontimeout: () => reject(new Error('请求超时')),
+            onabort: () => reject(new Error('请求已取消')),
           });
         } else {
           fetch(API_URL, {
+            signal: AbortSignal.timeout(45000),
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...authHeader },
             body: JSON.stringify(body),
@@ -1549,6 +1934,7 @@
 
     /** 选项 + 提交 */
     async autoSelectAndSubmit(aiResponse, itemBodyElement) {
+      if (Actions.stopped) return false;
       if (!itemBodyElement) throw new Error('题目容器为空');
       const listRes = Resolve.within(itemBodyElement, DOM.optionList);
       const list = listRes.node;
@@ -1559,6 +1945,7 @@
       if (!targets.length) throw new Error(`无法从 AI 回复解析出答案：${String(aiResponse).slice(0, 60)}`);
 
       for (const idx of targets) {
+        if (Actions.stopped) return false;
         const opt = options[idx];
         if (!opt) continue;
         const clickable = opt.querySelector('label.el-radio, label, input, .el-radio__input, [class*="radio"]') || opt;
@@ -1569,8 +1956,8 @@
 
       await Utils.sleep(500);
       // 找「提交/保存」按钮
-      const ownerDoc = itemBodyElement.ownerDocument || document;
-      const roots = [itemBodyElement.parentElement, itemBodyElement, ownerDoc].filter(Boolean);
+      if (Actions.stopped) return false;
+      const roots = [itemBodyElement, itemBodyElement.closest('.subject-item') || itemBodyElement.parentElement].filter(Boolean);
       let submitBtn = null;
       for (const root of roots) {
         const btns = [...root.querySelectorAll(DOM.submitButton.join(','))];
@@ -1588,7 +1975,7 @@
   };
 
   /* ==========================================================================
-   * 10. UI 面板
+   * 11. UI 面板
    *
    * 设计约束（重大蓝白，克制大气）：
    *   - 单一强调色：重大蓝 #0B4F9E，只用于主操作与选中态，不做装饰性着色
@@ -1921,6 +2308,7 @@
     };
 
     const applyMove = (clientX, clientY) => {
+      if (!isDragging) return;
       const { w: vw, h: vh } = viewport();
       pendingLeft = clampLeft(dragStartLeft + (clientX - dragStartX), vw);
       pendingTop = clampTop(dragStartTop + (clientY - dragStartY), vh);
@@ -1948,8 +2336,8 @@
 
       isDragging = true;
       activePointerId = e.pointerId;
-      dragStartX = e.clientX;
-      dragStartY = e.clientY;
+      dragStartX = e.clientX + iframe.getBoundingClientRect().left;
+      dragStartY = e.clientY + iframe.getBoundingClientRect().top;
       dragStartLeft = parseFloat(iframe.style.left) || 0;
       dragStartTop = parseFloat(iframe.style.top) || 0;
 
@@ -1970,20 +2358,26 @@
       if (!isDragging) return;
       if (activePointerId !== null && e.pointerId !== activePointerId) return;
       e.preventDefault();
-      applyMove(e.clientX, e.clientY);
+      const rect = iframe.getBoundingClientRect();
+      applyMove(e.clientX + rect.left, e.clientY + rect.top);
     };
 
     ui.header.addEventListener('pointerdown', onHeaderPointerDown);
     ui.header.addEventListener('pointermove', onHeaderPointerMove);
     ui.header.addEventListener('pointerup', endDrag);
     ui.header.addEventListener('pointercancel', endDrag);
+    ui.header.addEventListener('lostpointercapture', endDrag);
     // 指针捕获失效时（老浏览器）用 document 级事件兜底
     doc.addEventListener('pointermove', onHeaderPointerMove);
     doc.addEventListener('pointerup', endDrag);
     // 拖动时 iframe 是 pointer-events:none，事件会落到宿主页面，这里再兜一层
     try {
-      window.addEventListener('pointermove', e => applyMove(e.clientX, e.clientY));
+      window.addEventListener('pointermove', e => {
+        if (e.pointerId === activePointerId) applyMove(e.clientX, e.clientY);
+      });
       window.addEventListener('pointerup', endDrag);
+      window.addEventListener('pointercancel', endDrag);
+      window.addEventListener('blur', endDrag);
     } catch (_) { /* 忽略 */ }
 
     // ---- 日志区滚动兜底 ----
@@ -1997,7 +2391,7 @@
     // 只有原生滚动没生效（变更量为 0）才手动接管，避免双重滚动。
     doc.addEventListener('wheel', e => {
       const area = ui.body;
-      if (!area) return;
+      if (!area || !area.contains(e.target) || ui.settings.style.display === 'block') return;
       // 内容不足一屏，不需要滚动
       if (area.scrollHeight <= area.clientHeight) return;
 
@@ -2025,6 +2419,9 @@
       ui.miniBasic.classList.add('show');
       iframe.style.width = miniSize + 'px';
       iframe.style.height = miniSize + 'px';
+      const { w, h } = viewport();
+      iframe.style.left = `${clampLeft(parseFloat(iframe.style.left) || 0, w)}px`;
+      iframe.style.top = `${clampTop(parseFloat(iframe.style.top) || 0, h)}px`;
     });
     ui.miniBasic.addEventListener('click', () => {
       if (!isMinimized) return;
@@ -2053,6 +2450,7 @@
     // 状态语义靠 CSS 类的左侧色条表达，不再用 emoji 装饰
     const append = (message, kind = '') => {
       const li = doc.createElement('li');
+      const nearBottom = ui.body.scrollHeight - ui.body.scrollTop - ui.body.clientHeight < 60;
       li.innerText = message;
       if (kind) li.className = kind;
       ui.info.appendChild(li);
@@ -2060,7 +2458,6 @@
       Diag.logBuffer.push(`[${new Date().toLocaleTimeString()}] ${message}`);
       if (Diag.logBuffer.length > 300) Diag.logBuffer.shift();
       // 只在用户没往上翻的时候自动滚到底，避免打断回看日志
-      const nearBottom = ui.body.scrollHeight - ui.body.scrollTop - ui.body.clientHeight < 60;
       if (nearBottom) {
         try {
           li.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'nearest' });
@@ -2123,6 +2520,7 @@
         autoComment: ui.featureAutoComment.checked,
         rate,
       });
+      if (running) Player.applySpeed(rate);
       ui.settings.style.display = 'none';
       ok(`配置已保存（倍速 ${rate}x）`);
     };
@@ -2139,13 +2537,14 @@
 
       // 区分「本页不该有」和「本该有却没有」，避免一堆正常的未命中吓到使用者
       const miss = report['契约'].filter(r => r.note !== 'OK').map(r => r.name);
-      const critical = miss.filter(n => CRITICAL_CONTRACTS.includes(n));
-      const optional = miss.filter(n => !CRITICAL_CONTRACTS.includes(n));
+      const required = criticalContracts();
+      const critical = miss.filter(n => required.includes(n));
+      const optional = miss.filter(n => !required.includes(n));
 
       if (critical.length) {
         warn(`关键契约未命中：${critical.join(', ')} —— 这会影响自动播放`);
       } else {
-        ok('关键契约全部命中（媒体查找 / 进度判定可用）');
+        ok('未发现当前页面所需关键契约缺失');
       }
       if (optional.length) {
         log(`其余未命中（本页类型通常不需要，可忽略）：${optional.join(', ')}`);
@@ -2167,7 +2566,8 @@
     ui.btnStop.onclick = () => {
       Store.clearPending();
       Actions.stop();
-      Player.unmute();          // 解除静音强制，把声音还给用户
+      // 完整关闭：卸载播放守护 + 解除静音强制，把控制权还给用户
+      Player.shutdown();
       log('已停止，页面即将刷新');
       setTimeout(() => window.location.reload(), 400);
     };
@@ -2191,7 +2591,14 @@
       ui.btnStart.disabled = true;
       log('启动中...');
       if (startHandler) {
-        Promise.resolve(startHandler()).catch(e => error(`运行异常：${e?.message || e}`));
+        Promise.resolve().then(() => startHandler()).catch(e => {
+          error(`运行异常：${e?.message || e}`);
+          Store.clearPending();
+        }).finally(() => {
+          running = false;
+          ui.btnStart.disabled = false;
+          if (ui.btnStart.innerText === '播放中') ui.btnStart.innerText = '开始播放';
+        });
       }
     };
 
@@ -2215,7 +2622,7 @@
   }
 
   /* ==========================================================================
-   * 11. 运行器
+   * 12. 运行器
    * ========================================================================== */
 
   /** 负责把日志/状态统一出口，避免各 Runner 直接依赖 panel 变量 */
@@ -2232,8 +2639,10 @@
       else console.warn('[CQU雨课堂]', m);
     },
     stopped: false,
+    routeUrl: '',
     stop() {
       this.stopped = true;
+      Player.stop();
     },
     reset() {
       this.stopped = false;
@@ -2257,7 +2666,7 @@
     /** 找到当前页的「下一节」按钮并点击 */
     clickNext() {
       const { selector, node } = Resolve.one(DOM.nextButton);
-      if (!node) return false;
+      if (!node || node.disabled || node.getAttribute('aria-disabled') === 'true' || node.classList.contains('is-disabled')) return false;
       // 上游做法：先派发 mousemove 触发框架的 hover 逻辑，再点击
       try {
         const ev = new Event('mousemove', { bubbles: true });
@@ -2373,6 +2782,7 @@
             await this.openLeaf(leaf);
             break;
         }
+        if (Route.current()?.isCatalog === false || Actions.stopped) return;
       }
 
       if (step >= this.maxSteps) {
@@ -2392,6 +2802,7 @@
      */
     async openLeaf(leaf) {
       const before = location.href;
+      Store.setPending(Route.classroomId(), before);
       leaf.node.click();
       // 等待可能的页面跳转
       await Utils.sleep(1500);
@@ -2403,25 +2814,25 @@
       await Utils.sleep(1500);
       if (location.href !== before) return;
 
-      this.panel.warn(`${leaf.title} 点击后页面无变化，可能未成功打开`);
-      this.advanceCursor();
+      this.panel.warn(`${leaf.title} 点击后页面无变化，请确认是否在新标签页打开`);
+      Actions.stop();
     }
 
     /** 处理学习页（视频/音频/图文），完成后回目录 */
     async handleLearningPage(route) {
       this.panel.log(`学习页类型：${route.type || '未知'}`);
 
-      if (route.type === 'homework' || route.type === 'exam') {
+      if (['homework', 'exam', 'live'].includes(route.type)) {
         this.panel.log(`${route.type} 页面不自动作答`);
         return;
       }
 
       const ready = await Utils.poll(() => Boolean(Media.find().el), { interval: 500, timeout: 20000 });
+      if (Actions.stopped) return;
       const { el: media, kind } = Media.find();
 
       if (!ready || !media) {
-        this.panel.log('未检测到媒体元素，按已完成处理并返回目录');
-        await this.returnToCatalog();
+        this.panel.warn('未检测到媒体元素，保留当前进度，请确认页面加载情况');
         return;
       }
 
@@ -2439,19 +2850,29 @@
         return;
       }
 
-      const finished = await Player.waitUntilDone(media, { timeout: await Utils.getMediaTimeout() });
-      stopObserve();
+      let finished;
+      try {
+        finished = await Player.waitUntilDone(media, { timeout: await Utils.getMediaTimeout() });
+      } finally {
+        stopObserve();
+      }
+      if (Actions.stopped) return;
 
-      if (finished) {
+      if (finished === 'done') {
         this.panel.ok('播放完成');
+      } else if (finished === 'stalled') {
+        // 卡死也继续往下走，否则会卡在这一节反复重试，这正是「不能连续播放」的表现
+        this.panel.warn('该节点播放停滞，已跳过继续下一节');
       } else {
-        this.panel.warn('等待播放完成超时，仍继续下一步');
+        this.panel.warn('等待播放完成超时，保留当前页面供重试');
+        return;
       }
       await this.returnToCatalog();
     }
 
     /** 回目录：优先点「下一节」，否则回目录 URL */
     async returnToCatalog() {
+      if (Actions.stopped) return;
       if (Runner.clickNext()) {
         await Utils.sleep(2000);
         return;
@@ -2499,6 +2920,7 @@
 
         const body = Resolve.one(['.item-body', '[class*="item-body"]', '.item-type']).node || item;
         const ocr = await Solver.recognize(body, this.panel);
+        if (Actions.stopped) return;
         if (!ocr || ocr.length <= 5) {
           this.panel.log(`第 ${i + 1} 题文本过短，跳过`);
           continue;
@@ -2507,6 +2929,7 @@
           try {
             this.panel.log(`第 ${i + 1} 题请求 AI（第 ${retry} 次）`);
             const answer = await Solver.askAI(ocr, 4);
+            if (Actions.stopped) return;
             await Solver.autoSelectAndSubmit(answer, body);
             break;
           } catch (e) {
@@ -2561,10 +2984,14 @@
             Player.applySpeed();
             Player.mute();
             const stop = Player.observePause(media);
-            await Player.waitUntilDone(media);
-            stop();
+            let finished;
+            try { finished = await Player.waitUntilDone(media); } finally { stop(); }
+            // 卡死不再中断整轮：记录后继续处理下一个子项
+            if (finished === 'stalled') this.panel.warn('子项播放停滞，继续下一项');
+            if (Actions.stopped) return;
           } else {
-            await Utils.poll(() => Resolve.completionMarker().done, { interval: 1000, timeout: 60000 });
+            const finished = await Utils.poll(() => Resolve.completionMarker().done, { interval: 1000, timeout: 60000 });
+            if (!finished || Actions.stopped) { Actions.stop(); return; }
           }
           history.back();
           await Utils.sleep(1500);
@@ -2611,6 +3038,7 @@
           await Utils.sleep(800);
           const sendBtn = Resolve.all(DOM.commentSubmit).nodes
             .find(b => !b.disabled && !b.classList.contains('is-disabled'));
+          if (Actions.stopped) return;
           if (sendBtn) {
             sendBtn.click();
             this.panel.ok(`已在${typeText}区发表评论`);
@@ -2654,10 +3082,13 @@
           Player.applySpeed();
           Player.mute();
           const stop = Player.observePause(media);
-          await Player.waitUntilDone(media);
-          stop();
+          let finished;
+          try { finished = await Player.waitUntilDone(media); } finally { stop(); }
+          if (finished === 'stalled') this.panel.warn('播放停滞，返回列表继续');
+          if (Actions.stopped) return;
           history.back();
           await Utils.sleep(1500);
+          return;
         }
       }
 
@@ -2692,6 +3123,12 @@
         const title = Utils.normalized(course.querySelector('h2')?.innerText || course.innerText).slice(0, 50);
         const statusText = Utils.normalized(Resolve.within(course, DOM.leafStatus).node?.innerText || '');
         const type = Media.guessLeafType({ iconHref, text: `${title} ${statusText}` });
+
+        if (type === 'exam' || type === 'live') {
+          this.panel.log('考试/直播不自动处理，跳过');
+          this.updateProgress(this.outside + 1, 0);
+          continue;
+        }
 
         if (Utils.isDone(statusText) && !Utils.isExplicitlyUndone(statusText)) {
           this.panel.ok(`${title} 已完成，跳过`);
@@ -2746,7 +3183,7 @@
       // 防切屏必须在页面脚本注册监听之前生效，越早越好
       preventScreenCheck();
 
-      if (r.type === 'exercise' || r.type === 'homework') {
+      if (['exercise', 'homework', 'exam', 'live'].includes(r.type)) {
         this.panel.warn('作业/练习类页面暂不自动作答，仅提供诊断');
         this.panel.log('如需适配请点 [诊断] 反馈结构');
         this.panel.resetStartButton('开始播放');
@@ -2756,6 +3193,7 @@
       // ---- 1. 等媒体元素出现 ----
       this.panel.log('正在查找播放器（含 shadow DOM / iframe）...');
       const ready = await Utils.poll(() => Boolean(Media.find().el), { interval: 500, timeout: 30000 });
+      if (Actions.stopped) return;
       const found = Media.find();
 
       if (!ready || !found.el) {
@@ -2783,52 +3221,61 @@
       Player.applySpeed(rate);
       Player.mute();
 
-      const stopObserve = Player.observePause(media);
+      let stopObserve = Player.observePause(media);
       const stopKeepAlive = Player.keepAlive();
-
-      const started = await Player.kickstart(media);
-      if (started) {
-        this.panel.ok(`已开始播放：${rate}x，静音，后台挂机中`);
-      } else {
-        this.panel.warn('未能自动开始播放');
-        this.panel.log('请手动点击播放器一次，脚本会自动接管倍速与保持播放');
-      }
-
-      // 等待真正开始推进（确认不是「假播放」）
-      const advanced = await Utils.poll(() => {
-        const cur = Media.find().el;
-        if (cur) media = cur;
-        if (!media) return false;
-        return media.currentTime > 0.5 || (!media.paused && media.readyState >= 2);
-      }, { interval: 500, timeout: 20000 });
-
-      if (!advanced) {
-        this.panel.warn('媒体未开始推进，可能仍被拦截或资源加载失败');
-      } else {
-        this.panel.log('播放已确认推进，开始挂机等待完成');
-      }
+      const initialTime = media.currentTime;
 
       try {
-        const done = await Player.waitUntilDone(media, {
+        const started = await Player.kickstart(media);
+        if (started) {
+          this.panel.ok(`已开始播放：${rate}x，静音，后台挂机中`);
+        } else {
+          this.panel.warn('未能自动开始播放');
+          this.panel.log('请手动点击播放器一次，脚本会自动接管倍速与保持播放');
+        }
+
+        // 等待真正开始推进（确认不是「假播放」）
+        const advanced = await Utils.poll(() => {
+          if (!media) return false;
+          return media.ended || media.currentTime > initialTime + 0.1;
+        }, { interval: 500, timeout: 20000 });
+
+        if (!advanced) {
+          this.panel.warn('媒体未开始推进，可能仍被拦截或资源加载失败');
+        } else {
+          this.panel.log('播放已确认推进，开始挂机等待完成');
+        }
+
+        const result = await Player.waitUntilDone(media, {
+          getMedia: () => media,
           onTick: () => {
             // 媒体元素被替换（切清晰度/切源）时重新接管
             const cur = Media.find().el;
             if (cur && cur !== media) {
               this.panel.log('检测到播放器元素变化，重新接管');
+              stopObserve();
               media = cur;
-              Player.applySpeed(rate);
+              stopObserve = Player.observePause(media);
+              Player.applySpeed();
               Player.mute(media);
             }
           },
         });
-        if (done) this.panel.ok('播放完成');
-        else this.panel.warn('等待播放完成超时（可能是长视频或进度上报延迟）');
+        if (result === 'done') {
+          this.panel.ok('播放完成');
+        } else if (result === 'stalled') {
+          this.panel.warn('播放停滞：时间轴长时间未推进');
+        } else {
+          this.panel.warn('等待播放完成超时或已停止，保留当前页面供重试');
+          return;
+        }
       } finally {
         stopObserve();
         stopKeepAlive();
       }
 
       // ---- 3. 收尾 ----
+      if (Actions.stopped) return;
       if (Utils.inIframe()) {
         this.panel.log('本页在 iframe 内，已播放完毕，通知父窗口');
         try {
@@ -2858,37 +3305,57 @@
   }
 
   /* ==========================================================================
-   * 12. 路由分发 + 启动
+   * 13. 路由分发 + 启动
    * ========================================================================== */
 
   async function start() {
     Actions.reset();
-    const route = Route.current();
     const classroomId = Route.classroomId();
-
-    if (!route) {
+    if (!Route.current()) {
       panel.warn('当前页面不是已适配的课程学习页');
       panel.log('请进入 /pro/lms/<sign>/<classroom_id> 或 /v2/web/studentLog/<id> 后重试');
       panel.resetStartButton('开始播放');
       return;
     }
 
-    // 记录跨页自动恢复标记
-    Store.setPending(classroomId, location.href.split('?')[0]);
-    panel.log(`识别到课堂 ID：${classroomId || '(未知)'}`);
+    // ---- 安装播放守护 ----
+    // 顺序很重要：先装 capture 阶段的守护，再执行 preventScreenCheck()。
+    // 因为 preventScreenCheck() 会改写 addEventListener，
+    // 而 Guard 内部用的是改写前捕获的原生方法，先装可确保注册成功。
+    Guard.install({
+      shouldRun: () => !Actions.stopped,
+      preferredRate: () => Store.getFeatureConf().rate || Config.playbackRate,
+    });
+    preventScreenCheck();
+    panel.log('播放守护已启用（捕获阶段拦截暂停 / 可见性变化）');
 
-    if (route.kind === 'pro') {
-      await new ProRunner(panel).run();
-    } else if (route.kind === 'v2') {
-      await new V2Runner(panel).run();
-    } else if (route.kind === 'ai') {
-      await new AiWorkspaceRunner(panel, route).run();
-    } else if (route.kind === 'pro-ai') {
-      panel.warn('专业版 AI 学习空间页面暂未适配，仅提供诊断信息');
-      panel.log('请点击 [诊断] 并把结果反馈，以便补充适配');
-      panel.resetStartButton('开始播放');
-    } else {
-      panel.resetStartButton('开始播放');
+    // 记录跨页自动恢复标记
+    Store.setPending(classroomId, Route.current().isCatalog ? location.href : '');
+    panel.log(`识别到课堂 ID：${classroomId || '(未知)'}`);
+    try {
+      for (let step = 0; step < 500 && !Actions.stopped; step++) {
+        const route = Route.current();
+        if (!route || route.classroomId !== classroomId) break;
+        Actions.routeUrl = location.href;
+        if (route.kind === 'pro') {
+          await new ProRunner(panel).run();
+        } else if (route.kind === 'v2') {
+          await new V2Runner(panel).run();
+        } else if (route.kind === 'ai') {
+          if (route.isCatalog) await new ProRunner(panel).run();
+          else await new AiWorkspaceRunner(panel, route).run();
+        } else {
+          panel.warn('专业版 AI 学习空间页面暂未适配，仅提供诊断信息');
+          panel.log('请点击 [诊断] 并把结果反馈，以便补充适配');
+          panel.resetStartButton('开始播放');
+        }
+        if (location.href === Actions.routeUrl) break;
+        await Utils.sleep(500);
+      }
+    } finally {
+      Player.stop();
+      if (location.href === Actions.routeUrl || Actions.stopped || Route.classroomId() !== classroomId) Store.clearPending();
+      Actions.routeUrl = '';
     }
   }
 
